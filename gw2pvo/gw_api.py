@@ -38,7 +38,7 @@ class GoodWeApi:
     def calcMPTTsPower(self, data):
         result = [
             data['vpv' + str(i)]
-            for i in range(1, 5)
+            for i in range(1, 3)
             if 'vpv' + str(i) in data
             # if data['vpv' + str(i)]
             if data['vpv' + str(i)] < 6553
