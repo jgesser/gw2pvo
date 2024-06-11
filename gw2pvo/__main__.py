@@ -59,7 +59,7 @@ def run_once(settings, city):
             return
 
     # Fetch the last reading from GoodWe
-    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_account, settings.gw_password)
+    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
     data = gw.getCurrentReadings()
 
     # Check if we want to abort when offline
@@ -95,7 +95,7 @@ def run_once(settings, city):
 
     if settings.pvo_system_id and settings.pvo_api_key:
         pvo = pvo_api.PVOutputApi(settings.pvo_system_id, settings.pvo_api_key)
-        pvo.add_status(data['pgrid_w'], last_eday_kwh, data.get('temperature'), voltage)
+        pvo.add_status(data['pgrid_w'], last_eday_kwh, data.get('temperature'), voltage, data['powers'])
     else:
         logging.debug(str(data))
         logging.warning("Missing PVO id and/or key")
@@ -104,7 +104,7 @@ def copy(settings):
     # Fetch readings from GoodWe
     date = datetime.strptime(settings.date, "%Y-%m-%d")
 
-    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_account, settings.gw_password)
+    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
     data = gw.getDayReadings(date)
 
     if settings.pvo_system_id and settings.pvo_api_key:
@@ -156,6 +156,7 @@ def run():
     )
     parser.set_defaults(**defaults)
     parser.add_argument("--gw-station-id", help="GoodWe station ID", metavar='ID')
+    parser.add_argument("--gw-inverter-id", help="GoodWe inverter ID", metavar='ID')
     parser.add_argument("--gw-account", help="GoodWe account", metavar='ACCOUNT')
     parser.add_argument("--gw-password", help="GoodWe password", metavar='PASSWORD')
     parser.add_argument("--pvo-system-id", help="PVOutput system ID", metavar='ID')
@@ -187,8 +188,8 @@ def run():
     if isinstance(args.skip_offline, str):
         args.skip_offline = args.skip_offline.lower() in ['true', 'yes', 'on', '1']
 
-    if args.gw_station_id is None or args.gw_account is None or args.gw_password is None:
-        sys.exit("Missing --gw-station-id, --gw-account and/or --gw-password")
+    if args.gw_station_id is None or args.gw_inverter_id is None or args.gw_account is None or args.gw_password is None:
+        sys.exit("Missing --gw-station-id, --gw-inverter-id, --gw-account and/or --gw-password")
 
     if args.city:
         city = Location(lookup(args.city, database()))
