@@ -164,18 +164,25 @@ class GoodWeApi:
         return eday_kwh
 
     def getLocation(self):
-        payload = {
-            'powerStationId' : self.system_id
-        }
-        data = self.call("v2/PowerStation/GetMonitorDetailByPowerstationId", payload)
-        if 'info' not in data:
-            logging.warning("GetMonitorDetailByPowerstationId returned bad data: " + str(data))
-            return {}
-
-        return {
-            'latitude' : data['info'].get('latitude'),
-            'longitude' : data['info'].get('longitude'),
-        }
+        # GetMonitorDetailByPowerstationId was discontinued by GoodWe (always
+        # returns an empty {}), so latitude/longitude are no longer available
+        # this way. Left here in case a replacement endpoint surfaces later;
+        # for now only DarkSky/Netatmo temperature lookups consumed this and
+        # neither is configured.
+        #
+        # payload = {
+        #     'powerStationId' : self.system_id
+        # }
+        # data = self.call("v2/PowerStation/GetMonitorDetailByPowerstationId", payload)
+        # if 'info' not in data:
+        #     logging.warning("GetMonitorDetailByPowerstationId returned bad data: " + str(data))
+        #     return {}
+        #
+        # return {
+        #     'latitude' : data['info'].get('latitude'),
+        #     'longitude' : data['info'].get('longitude'),
+        # }
+        return {}
 
     def getDayPac(self, date):
         ''' GetPowerStationPacByDayForApp was discontinued (always returns
