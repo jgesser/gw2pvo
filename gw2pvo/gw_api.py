@@ -17,7 +17,7 @@ class GoodWeApi:
         self.account = account
         self.password = password
         self.token = '{"version":"v3.1","client":"ios","language":"en"}'
-        self.global_url = 'https://semsplus.goodwe.com/api/'
+        self.global_url = 'https://www.semsportal.com/api/'
         self.base_url = self.global_url
 
     def statusText(self, status):
@@ -64,13 +64,39 @@ class GoodWeApi:
         ]
         return round(sum(pv_voltages), 1)
 
+    def dictValue(self, entries, key):
+        for entry in entries:
+            if entry['key'] == key:
+                return entry['value']
+        return None
+
+    def extractMpttData(self, inverterDict):
+        ''' GetInverterAllPoint reports each MPPT as a combined "V/A" string
+        (dcVandC1, dcVandC2, ...) instead of separate vpv/ipv fields as the
+        old GetMonitorDetailByPowerstationId did. Convert back to that shape
+        so calcPvVoltage/calcMPTTsPower can stay unchanged. '''
+        right = inverterDict.get('right', [])
+        data = {}
+        for i in range(1, 4):
+            raw = self.dictValue(right, 'dcVandC' + str(i))
+            if not raw or '/' not in raw:
+                continue
+            try:
+                v, a = (float(x) for x in raw.split('/'))
+            except ValueError:
+                continue
+            data['vpv' + str(i)] = v
+            data['ipv' + str(i)] = a
+        return data
+
     def getCurrentReadings(self):
         ''' Download the most recent readings from the GoodWe API. '''
 
         payload = {
-            'powerStationId' : self.system_id
+            'PowerStationId' : self.system_id
         }
-        data = self.call("v2/PowerStation/GetMonitorDetailByPowerstationId", payload)
+        data = self.call("v3/PowerStation/GetInverterAllPoint", payload)
+        inverters = data.get('inverterPoints', [])
 
         result = {
             'status' : 'Unknown',
@@ -80,19 +106,20 @@ class GoodWeApi:
             'grid_voltage' : 0,
             'pv_voltage' : 0,
             'powers' : [],
-            'latitude' : data['info'].get('latitude'),
-            'longitude' : data['info'].get('longitude')
+            'latitude' : None,
+            'longitude' : None
         }
 
         count = 0
-        for inverterData in data['inverter']:
+        for inverterData in inverters:
             status = self.statusText(inverterData['status'])
+            mpttData = self.extractMpttData(inverterData['dict'])
             if status == 'Normal':
                 result['status'] = status
                 result['pgrid_w'] += inverterData['out_pac']
-                result['grid_voltage'] += self.parseValue(inverterData['output_voltage'], 'V')
-                result['pv_voltage'] += self.calcPvVoltage(inverterData['d'])
-                result['powers'] = self.calcMPTTsPower(inverterData['d'])
+                result['grid_voltage'] += self.parseValue(self.dictValue(inverterData['dict'].get('left', []), 'acVacVol') or '0', 'V')
+                result['pv_voltage'] += self.calcPvVoltage(mpttData)
+                result['powers'] = self.calcMPTTsPower(mpttData)
                 count += 1
             result['eday_kwh'] += inverterData['eday']
             result['etotal_kwh'] += inverterData['etotal']
@@ -100,14 +127,15 @@ class GoodWeApi:
             # These values should not be the sum, but the average
             result['grid_voltage'] /= count
             result['pv_voltage'] /= count
-        elif len(data['inverter']) > 0:
+        elif len(inverters) > 0:
             # We have no online inverters, then just pick the first
-            inverterData = data['inverter'][0]
+            inverterData = inverters[0]
+            mpttData = self.extractMpttData(inverterData['dict'])
             result['status'] = self.statusText(inverterData['status'])
             result['pgrid_w'] = inverterData['out_pac']
-            result['grid_voltage'] = self.parseValue(inverterData['output_voltage'], 'V')
-            result['pv_voltage'] = self.calcPvVoltage(inverterData['d'])
-            result['powers'] = self.calcMPTTsPower(inverterData['d'])
+            result['grid_voltage'] = self.parseValue(self.dictValue(inverterData['dict'].get('left', []), 'acVacVol') or '0', 'V')
+            result['pv_voltage'] = self.calcPvVoltage(mpttData)
+            result['powers'] = self.calcMPTTsPower(mpttData)
 
         message = "{status}, {pgrid_w} W now, {eday_kwh} kWh today, {etotal_kwh} kWh all time, {grid_voltage} V grid, {pv_voltage} V PV".format(**result)
         if result['status'] == 'Normal' or result['status'] == 'Offline':
@@ -150,16 +178,20 @@ class GoodWeApi:
         }
 
     def getDayPac(self, date):
+        ''' GetPowerStationPacByDayForApp was discontinued (always returns
+        an empty list). GetInverterDataByColumn with column=Pac returns the
+        same per-inverter power curve, keyed by 'column' instead of 'pac'. '''
         payload = {
-            'id' : self.system_id,
-            'date' : date.strftime('%Y-%m-%d')
+            'id' : self.inverter_id,
+            'date' : date.strftime('%Y-%m-%d'),
+            'column' : 'Pac'
         }
-        data = self.call("v2/PowerStationMonitor/GetPowerStationPacByDayForApp", payload)
-        if 'pacs' not in data:
-            logging.warning("GetPowerStationPacByDayForApp returned bad data: " + str(data))
+        data = self.call("v2/PowerStationMonitor/GetInverterDataByColumn", payload)
+        if 'column1' not in data:
+            logging.warning("GetInverterDataByColumn returned bad data: " + str(data))
             return []
 
-        return data['pacs']
+        return [{'date': sample['date'], 'pac': sample['column']} for sample in data['column1']]
 
     def getColumnByDay(self, date, column):
         payload = {
