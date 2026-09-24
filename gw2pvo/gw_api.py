@@ -17,7 +17,7 @@ class GoodWeApi:
         self.account = account
         self.password = password
         self.token = '{"version":"v3.1","client":"ios","language":"en"}'
-        self.global_url = 'https://semsportal.com/api/'
+        self.global_url = 'https://semsplus.goodwe.com/api/'
         self.base_url = self.global_url
 
     def statusText(self, status):
