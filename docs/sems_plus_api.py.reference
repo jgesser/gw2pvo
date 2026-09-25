@@ -1,0 +1,385 @@
+# REFERENCE COPY — not live code, not imported by anything.
+#
+# This is the fixed, tested version of gw2pvo/gw2pvo/sems_plus_api.py that was
+# built on 2026-09-25 and then discarded from the working repo at the user's
+# request (kept only as a future reference, see gw2pvo_sems_migration.md).
+#
+# Provenance: ported from github.com/aroundmyroom/gw2pvo (fork, Aug 2026),
+# which itself credits github.com/timvanderHorst/goodwe-semsplus for the
+# reverse-engineered SEMS+ REST protocol. Two bugs in the fork's version were
+# found and fixed here (see comments inline: dynamic regional gateway, lazy
+# URL evaluation) plus a grid-voltage extraction bug and added per-MPPT power
+# extraction.
+#
+# Verified end-to-end on 2026-09-25 against the real SEMS+ API with real
+# credentials (login, current readings, multi-MPPT power, grid voltage,
+# lat/long) — see gw2pvo_sems_migration.md for the confirmed endpoint list
+# and sample responses. getDayReadings()/--date is NOT implemented (no known
+# SEMS+ endpoint for historical per-day breakdown was found).
+#
+# To resume this work: copy this file's body (below the delimiter) back to
+# gw2pvo/gw2pvo/sems_plus_api.py, re-add the `--gw-api sems|semsplus` flag and
+# get_gw_api() dispatcher to gw2pvo/gw2pvo/__main__.py (see the migration doc
+# for the exact diff description), and re-run the test scripts described in
+# the migration doc to confirm nothing has changed API-side since.
+#
+# ============================== BEGIN FILE BODY ==============================
+
+import base64
+import hashlib
+import json
+import logging
+import time
+from datetime import datetime
+
+import requests
+
+__author__ = "GitHub Copilot"
+__license__ = "MIT"
+__doc__ = "Client for the new GoodWe SEMS+ portal (https://semsplus.goodwe.com), " \
+          "based on https://github.com/timvanderHorst/goodwe-semsplus"
+
+# The SEMS+ station flow/info/device-status endpoints don't expose the
+# cumulative "energy today" / "energy total" counters nor per-inverter voltage.
+# However the portal's own dashboard widgets call additional endpoints that do:
+# - "stations/production" returns cumulative energy (e.g. proSystemTotalStats)
+#   for a given date range.
+# - "equipments/{sn}/telemetry" returns detailed per-inverter data, including
+#   AC (grid) voltage per phase and PV (MPPT) voltage.
+# Both were confirmed from captured browser requests.
+
+class SemsPlusApi:
+    ''' Fetch readings from the new SEMS+ portal, exposing the same interface as
+    gw_api.GoodWeApi so it can be used as a drop-in replacement in gw2pvo. '''
+
+    SEMS_HOST = 'https://semsplus.goodwe.com'
+    # Fallback only: the real gateway is regional (e.g. us-gateway, eu-gateway)
+    # and is returned by the login response as `data.api`. We always prefer
+    # that value once we've authenticated at least once.
+    DEFAULT_GATEWAY_HOST = 'https://eu-gateway.semsportal.com'
+    LOGIN_URL = '{}/web/sems/sems-user/api/v1/auth/cross-login'.format(SEMS_HOST)
+
+    # Earliest possible install date to use as the start of a lifetime query.
+    EPOCH_START = '2000-01-01 00:00:00'
+
+    USER_AGENT = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/151.0.0.0 Safari/537.36'
+    )
+
+    def __init__(self, system_id, inverter_id, account, password):
+        self.system_id = system_id
+        self.inverter_id = inverter_id
+        self.account = account
+        self.password = password
+        self.session = None
+        self.token_json = ''
+        self.api_base = '{}/web/sems'.format(self.DEFAULT_GATEWAY_HOST)
+
+    @property
+    def stations_url(self):
+        return '{}/sems-plant/api/stations/simple-query'.format(self.api_base)
+
+    @property
+    def station_info_url(self):
+        return '{}/sems-plant/api/portal/stations/basic/info'.format(self.api_base)
+
+    @property
+    def station_flow_url(self):
+        return '{}/sems-plant/api/stations/flow'.format(self.api_base)
+
+    @property
+    def device_status_url(self):
+        return '{}/sems-plant/api/stations/device/all-status'.format(self.api_base)
+
+    @property
+    def production_url(self):
+        return '{}/sems-plant/api/stations/production'.format(self.api_base)
+
+    @property
+    def telemetry_url(self):
+        return '{}/sems-plant/api/equipments'.format(self.api_base)
+
+    def statusText(self, status):
+        ''' The SEMS+ station flow endpoint reports status using the same numeric
+        codes as the classic SEMS API (-1 Offline, 0 Waiting, 1 Normal, 2 Fault),
+        but some responses use the strings "online"/"offline" instead. '''
+        text = str(status).strip().lower()
+        if text == 'online':
+            return 'Normal'
+        if text == 'offline':
+            return 'Offline'
+        labels = {'-1': 'Offline', '0': 'Waiting', '1': 'Normal', '2': 'Fault'}
+        return labels.get(text, 'Unknown')
+
+    def makePwd(self, plaintext):
+        ''' pwd = base64( MD5-hex(password) ) '''
+        md5_hex = hashlib.md5(plaintext.encode()).hexdigest()
+        return base64.b64encode(md5_hex.encode()).decode()
+
+    def encodeSignature(self, token_json):
+        ''' X-Signature = base64( sha256(timestamp@uid@token) + '@' + timestamp ) '''
+        if not token_json:
+            return ''
+        try:
+            data = json.loads(token_json)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        ts = str(int(time.time() * 1000))
+        uid = data.get('uid', '')
+        token = data.get('token', '')
+        hash_input = "{}@{}@{}".format(ts, uid, token)
+        sig_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+        return base64.b64encode("{}@{}".format(sig_hash, ts).encode()).decode()
+
+    def gatewayHeaders(self):
+        return {
+            'token': self.token_json,
+            'X-Signature': self.encodeSignature(self.token_json),
+            'Access-Control-Allow-Origin': '*',
+            'neutral': '0',
+            'currentLang': 'en',
+            # The stations/production endpoint (used for energy totals) rejects
+            # requests that don't identify a browser/OS via these headers.
+            'brand': 'Chrome 151.0.0.0 Google Inc. en-GB Europe/Amsterdam',
+            'os': 'Windows 10.0 desktop',
+        }
+
+    def authenticate(self):
+        ''' Login to the SEMS+ portal and store the session token. '''
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': self.USER_AGENT,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': self.SEMS_HOST,
+            'Referer': '{}/'.format(self.SEMS_HOST),
+        })
+
+        # Visit the homepage first to obtain session cookies
+        session.get(self.SEMS_HOST, timeout=30)
+
+        payload = {
+            'account': self.account,
+            'pwd': self.makePwd(self.password),
+            'agreement': 1,
+            'isChinese': False,
+            'isLocal': False,
+        }
+
+        empty_token = json.dumps({
+            'uid': '', 'timestamp': 0, 'token': '',
+            'client': 'semsPlusWeb', 'version': '', 'language': 'en',
+        }, separators=(',', ':'))
+        self.token_json = empty_token
+
+        r = session.post(self.LOGIN_URL, json=payload, headers=self.gatewayHeaders(), timeout=15)
+        r.raise_for_status()
+        resp = r.json()
+
+        code = resp.get('code', resp.get('status', -1))
+        if code not in (0, 200, '00000', '200'):
+            raise Exception("Failed to login to SEMS+ (code {}): {}".format(code, resp.get('msg', resp)))
+
+        data = resp.get('data', {})
+        data['client'] = 'semsPlusWeb'
+        self.token_json = json.dumps(data, separators=(',', ':'))
+        self.session = session
+
+        # The login response tells us which regional gateway to use for every
+        # other call (e.g. https://us-gateway.semsportal.com/web/sems). Using
+        # the wrong region's gateway causes every subsequent call to fail with
+        # code C0602 ("account_login_abnormal") even though login succeeded.
+        api = data.get('api')
+        if api:
+            self.api_base = api.rstrip('/')
+
+    def call(self, method, path_builder, payload=None):
+        ''' Perform an authenticated request against the SEMS+ API, retrying on
+        failure. `path_builder` is a callable returning the full URL, evaluated
+        fresh on every attempt: the regional gateway (self.api_base) is only
+        known after authenticate() runs, so a URL built before the first
+        authenticate() call would otherwise keep pointing at the wrong
+        (default) gateway even after a successful re-authentication. '''
+        for i in range(1, 4):
+            try:
+                if self.session is None:
+                    self.authenticate()
+
+                url = path_builder()
+                headers = self.gatewayHeaders()
+                if method == 'GET':
+                    r = self.session.get(url, headers=headers, timeout=15)
+                else:
+                    r = self.session.post(url, json=payload or {}, headers=headers, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                logging.debug(data)
+
+                code = data.get('code', '')
+                if code == 'C0602':
+                    # Token expired, re-authenticate and retry
+                    logging.debug("SEMS+ token expired, re-authenticating")
+                    self.authenticate()
+                    continue
+
+                if code in ('00000', 0, 200, '200'):
+                    return data.get('data', {})
+
+                raise Exception("Failed to call SEMS+ API (code {})".format(code))
+            except requests.exceptions.RequestException as exp:
+                logging.warning(exp)
+                self.session = None
+            except Exception as exp:
+                logging.warning(exp)
+            time.sleep(i ** 3)
+        else:
+            raise Exception("Failed to call SEMS+ API (too many retries)")
+
+        return {}
+
+    def getProduction(self, items, start_time, end_time, dimension='day'):
+        ''' Query the SEMS+ dashboard KPI endpoint for cumulative production stats
+        (e.g. proSystemTotalStats) over a given time range. '''
+        payload = {
+            'stationId': self.system_id,
+            'items': items,
+            'dimension': dimension,
+            'isReport': False,
+            'startTime': start_time,
+            'endTime': end_time,
+        }
+        return self.call('POST', lambda: self.production_url, payload)
+
+    def getTelemetry(self, sn, device_type='INVERTER'):
+        ''' Query detailed per-device telemetry (AC/grid voltage per phase, PV/MPPT
+        voltage, temperature, etc) for a single inverter. '''
+        data = self.call('GET', lambda: '{}/{}/telemetry?deviceType={}&pwId={}'.format(
+            self.telemetry_url, sn, device_type, self.system_id))
+        return data if isinstance(data, list) else []
+
+    def _addVoltagesFromTelemetry(self, devices, result):
+        ''' Extract grid (AC) voltage, per-MPPT PV voltage and per-MPPT power
+        from the telemetry of every inverter listed in the device-status
+        response, averaging voltages across inverters and summing MPPT power.
+        Telemetry factor codes look like "Vac" (grid, no prefix) and
+        "MPPT-<n>:Vpv" / "MPPT-<n>:Ppv" / "MPPT-<n>:Ipv" (per string).
+
+        CAVEAT (multi-inverter, not exercised against real hardware): powers
+        are summed by MPPT index ACROSS inverters (mppt_powers_w keyed only by
+        "MPPT-<n>", not by serial), same limitation the legacy gw_api.py has.
+        Only ever tested with a single inverter (3 MPPTs) — if a second
+        physical inverter is ever added, verify this still does something
+        sensible before trusting the per-MPPT breakdown. '''
+        grid_voltages = []
+        pv_voltages = []
+        mppt_powers_w = {}
+        for detail in (devices or {}).get('deviceDetailList', []):
+            device_type = detail.get('deviceType', 'INVERTER')
+            for status_group in detail.get('statusDetailList', []):
+                for sn in status_group.get('snList', []):
+                    try:
+                        groups = self.getTelemetry(sn, device_type)
+                    except Exception as exp:
+                        logging.debug("Could not fetch telemetry for %s: %s", sn, exp)
+                        continue
+                    inverter_grid_voltages = []
+                    inverter_pv_voltage = 0.0
+                    for group in groups:
+                        for factor in group.get('factors', []):
+                            code = factor.get('code', '')
+                            value = factor.get('data')
+                            if value in (None, ''):
+                                continue
+                            try:
+                                value = float(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if code == 'Vac' or code.endswith(':Vac'):
+                                inverter_grid_voltages.append(value)
+                            elif code.endswith(':Vpv'):
+                                inverter_pv_voltage += value
+                            elif code.startswith('MPPT-') and code.endswith(':Ppv'):
+                                mppt = code.split(':')[0]
+                                mppt_powers_w[mppt] = mppt_powers_w.get(mppt, 0) + value * 1000
+                    if inverter_grid_voltages:
+                        grid_voltages.append(sum(inverter_grid_voltages) / len(inverter_grid_voltages))
+                    if inverter_pv_voltage:
+                        pv_voltages.append(inverter_pv_voltage)
+
+        if grid_voltages:
+            result['grid_voltage'] = round(sum(grid_voltages) / len(grid_voltages), 1)
+        if pv_voltages:
+            result['pv_voltage'] = round(sum(pv_voltages) / len(pv_voltages), 1)
+        if mppt_powers_w:
+            powers = [round(mppt_powers_w[k], 1) for k in sorted(mppt_powers_w)]
+            powers.append(round(sum(powers), 1))
+            result['powers'] = powers
+
+    def getCurrentReadings(self):
+        ''' Download the most recent readings from the SEMS+ API. '''
+
+        flow = self.call('GET', lambda: '{}?stationId={}'.format(self.station_flow_url, self.system_id))
+        info = self.call('POST', lambda: '{}?stationId={}'.format(self.station_info_url, self.system_id))
+
+        pgrid_w = round(float(flow.get('pAc') or 0) * 1000, 1)
+
+        result = {
+            'status': self.statusText(flow.get('status')),
+            'pgrid_w': pgrid_w,
+            'eday_kwh': 0,
+            'etotal_kwh': 0,
+            'grid_voltage': 0,
+            'pv_voltage': 0,
+            'powers': [],
+            'latitude': info.get('latitude'),
+            'longitude': info.get('longitude'),
+        }
+
+        # Get today's and lifetime cumulative energy from the SEMS+ dashboard
+        # KPI endpoint (the same one the SEMS+ website itself uses).
+        try:
+            now = datetime.now()
+            today = now.strftime('%Y-%m-%d')
+            today_start = today + ' 00:00:00'
+            today_end = today + ' 23:59:59'
+            now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+
+            day_stats = self.getProduction(['proSystemTotalStats'], today_start, today_end, dimension='day')
+            result['eday_kwh'] = float(day_stats.get('proSystemTotalStats') or 0)
+
+            total_stats = self.getProduction(['proSystemTotalStats'], self.EPOCH_START, now_str, dimension='year')
+            result['etotal_kwh'] = float(total_stats.get('proSystemTotalStats') or 0)
+        except Exception as exp:
+            logging.warning("Could not fetch energy totals from SEMS+ production API: %s", exp)
+
+        # Get grid/PV voltage from the per-inverter telemetry endpoint.
+        try:
+            devices = self.call('GET', lambda: '{}?stationId={}'.format(self.device_status_url, self.system_id))
+            self._addVoltagesFromTelemetry(devices, result)
+        except Exception as exp:
+            logging.warning("Could not fetch voltage from SEMS+ telemetry API: %s", exp)
+
+        message = "{status}, {pgrid_w} W now, {eday_kwh} kWh today, {etotal_kwh} kWh all time, {grid_voltage} V grid, {pv_voltage} V PV".format(**result)
+        if result['status'] in ('Normal', 'Offline'):
+            logging.info(message)
+        else:
+            logging.warning(message)
+
+        return result
+
+    def getDayReadings(self, date):
+        ''' The SEMS+ portal does not (yet) expose a historical per-day breakdown
+        endpoint, so copying old data is not supported for this API. Use
+        --gw-api sems (the classic SEMS portal) for the --date option. '''
+        raise Exception("Copying historical data (--date) is not supported with --gw-api semsplus, use --gw-api sems instead")
+
+    def getLocation(self):
+        info = self.call('POST', lambda: '{}?stationId={}'.format(self.station_info_url, self.system_id))
+        return {
+            'latitude': info.get('latitude'),
+            'longitude': info.get('longitude'),
+        }
+
+# =============================== END FILE BODY ===============================
