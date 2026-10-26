@@ -1,15 +1,61 @@
 # SEMS Portal → SEMS+ migration notes
 
 GoodWe is shutting down the legacy SEMS Portal API (`www.semsportal.com`) in
-favor of SEMS+ (`semsplus.goodwe.com`), reportedly around May 2026. This repo
-depends on the legacy REST API (`gw2pvo/gw_api.py`) and broke once some of its
-endpoints were discontinued (incident: 2026-09-24).
+favor of SEMS+ (`semsplus.goodwe.com`). The announced dates keep slipping
+(May 2026, then Aug 30 2026 per HA issue #206), and the legacy API is being
+dismantled piece by piece instead. This repo depends on the legacy REST API
+(`gw2pvo/gw_api.py`) and has broken twice so far:
+
+- 2026-09-24: some endpoints discontinued (see "Current state" below).
+- 2026-10-26: `www.semsportal.com` returns nginx 502 for everything (see
+  below).
+
+## Incident 2026-10-26: `www.semsportal.com` returns 502
+
+`www.semsportal.com` and `us.semsportal.com` answer every request with an
+nginx `502 Bad Gateway`. The regional hosts `eu.`, `au.` and
+`hk.semsportal.com` still accept the legacy `v2/Common/CrossLogin`, and any of
+them answers with the account's regional API in `api` (for this account:
+`https://hk.semsportal.com/api/` — the legacy region is **hk**, even though
+the SEMS+ gateway is `us-gateway`).
+
+Fix: `GoodWeApi.login()` tries a list of login hosts in order (`www`, `eu`,
+`au`, `hk`) and moves on to the next one on a network/HTTP error. Data calls
+always go to the host returned in `api`, never to the login host — a token
+issued by `eu` is rejected by `eu`'s own data endpoints (code 100002).
+
+Found along the way:
+
+- A wrong password is answered with code `100005` **and** a non-empty `api`
+  field, so the old `'api' not in data` check never detected it (it ended in
+  "too many retries"). `login()` now checks `code == 0`.
+- Code `100002` (token expired) now triggers a new login, like `100001`.
+- The legacy history is still up to date: `GetInverterDataByColumn` for
+  2026-10-26 had readings until 18:45 and 48.5 kWh, while SEMS+ said 47.7 kWh.
+  So no data loss on the legacy side yet.
+
+What the other integrations did:
+
+- **Home Assistant** (`TimSoethout/goodwe-sems-home-assistant` 11.13.0,
+  2026-10-22) reads all data from the SEMS+ Web API. The legacy API is only
+  used for inverter power control, with `https://eu.semsportal.com/api` as
+  its fallback host. Login modes tried in order: SEMS+ "new" (plain
+  cross-login), legacy, SEMS+ "web" (cross-login with browser headers +
+  `X-Signature`). For this account the plain SEMS+ cross-login returns code
+  `100004`, and only the "web" mode works — which is the one
+  `sems_plus_api.py.reference` already uses.
+- **openHAB** (`semsportal` binding in `openhab-addons`, no code change
+  since 2023) is broken for three reasons: hardcoded `www.semsportal.com`,
+  ignores the `api` field from the login, and uses the dead
+  `GetMonitorDetailByPowerstationId` (empty data → NPE, openhab-addons issue
+  #21786). Nobody has fixed it.
 
 ## Current state (fixed, on the legacy API)
 
-- Base URL is `https://www.semsportal.com/api/` (**not** `semsplus.goodwe.com`
-  — that domain has no working REST v2 endpoints, confirmed via direct
-  testing).
+- Login goes through the first available host among `www.`, `eu.`, `au.` and
+  `hk.semsportal.com`. Data calls go to the regional host returned by the
+  login (**not** `semsplus.goodwe.com` — that domain has no working REST v2
+  endpoints, confirmed via direct testing).
 - `getCurrentReadings()` uses `v3/PowerStation/GetInverterAllPoint` (the old
   `GetMonitorDetailByPowerstationId` is dead, always returns `{}`).
 - `getDayPac()` reuses `GetInverterDataByColumn` with `column=Pac` (the old
@@ -104,9 +150,16 @@ gateway returned by the login response.
 - `GET  {gateway}/sems-plant/api/equipments/<sn>/telemetry?deviceType=INVERTER&pwId=<stationId>` —
   per-inverter detail: `Vac` (grid voltage), `MPPT-<n>:Vpv`/`:Ipv`/`:Ppv`
   (per-string voltage/current/power), temperature, etc.
-- **No historical per-day breakdown endpoint was found.** `--date` import is
-  NOT supported by this client — it deliberately raises an exception
-  explaining to use the legacy client instead.
+- `POST {gateway}/sems-plant/api/stations/statistics` with
+  `{stationId, items: ["proSystemTotalStats"], dimension: "day", startTime, endTime}`
+  — **daily totals per date**, past days included
+  (`dataList[].statisticsList[] = {date, val}`, in kWh). Found in the HA
+  integration. Checked 2026-10-26: 2026-10-25 → 14.1 kWh, same as the legacy
+  API.
+- **No intraday (5-minute) history endpoint was found.** Neither this client
+  nor the HA integration has one: HA only uses the daily totals above.
+  `--date` import is NOT supported by this client — it deliberately raises an
+  exception explaining to use the legacy client instead.
 
 ### Known gaps (confirmed 2026-09-25, not worth fixing yet for a single-inverter setup)
 
@@ -120,6 +173,23 @@ gateway returned by the login response.
    from different physical inverters if there were more than one connected.
    This is the same limitation the legacy `gw_api.py` client has, so not a
    regression — just never exercised against real multi-inverter hardware.
+
+### Re-verified 2026-10-26
+
+`sems_plus_api.py.reference` still works unchanged against the live API:
+login (gateway `https://us-gateway.semsportal.com/web/sems`), today's energy,
+grid voltage, PV voltage and lat/long all came back. Two new gaps showed up,
+at night (inverter off):
+
+3. `status` came back as `Unknown` instead of `Offline`. `statusText()`
+   doesn't know the value `stations/flow` returns for an offline inverter.
+   This matters: `--skip-offline` and the CSV export compare against
+   `'Offline'`. Log the raw `status` at night and add it to the mapping.
+4. `etotal_kwh` doesn't match: SEMS+ said 49001.1 kWh, the legacy API
+   47579.8 kWh (~1400 kWh, about a month of production). Not uploaded to
+   PVOutput, so harmless for now, but it's worth finding out which one is
+   right (HA issue #248 reports wrong SEMS+ lifetime totals with the `year`
+   dimension).
 
 ## Status: reverted, kept for reference
 
@@ -148,8 +218,26 @@ for future reuse, not wired into `gw2pvo`.
      `parser.add_argument("--gw-api", help="GoodWe portal to use (default sems)", choices=['sems', 'semsplus'], default='sems')`
 3. Re-verify against the live API before trusting it again — GoodWe could
    change the SEMS+ protocol again by the time this is revisited.
-4. Reconsider switching the default to `semsplus` once the legacy portal is
-   fully shut down (~May 2026) or starts flaking further. At that point,
-   `--date` historical import will need either a newly-discovered SEMS+
-   endpoint, or falling back to Playwright scraping per
-   `ashwhall/ha-sems-plus-addon`.
+4. Fix the two night-time gaps found on 2026-10-26 (`Unknown` status,
+   `etotal_kwh` mismatch).
+5. Plan `--date` / `copy()` on SEMS+. Options, best first:
+   - Upload only the day's total with PVOutput `addoutput.jsp`, taken from
+     `stations/statistics` (daily totals, past days included). Loses the
+     5-minute curve, but keeps the daily energy in PVOutput correct.
+   - Look for an intraday history endpoint in the SEMS+ web UI's browser
+     traffic (the station's power chart has to come from somewhere).
+   - Playwright scraping per `ashwhall/ha-sems-plus-addon`, as a last
+     resort.
+
+### When to switch the default to `semsplus`
+
+Run both clients side by side before that becomes urgent. Switch when any of
+these happens:
+
+- `login()` fails on every legacy host (`Failed to login on GoodWe API (no
+  login host available)` in the logs).
+- The legacy data stops updating, i.e. `getCurrentReadings()` /
+  `GetInverterDataByColumn` lag behind what SEMS+ shows for the same day.
+- Another legacy endpoint we depend on (`GetInverterAllPoint`,
+  `GetInverterDataByColumn`, `GetPowerStationPowerAndIncomeByDay`) starts
+  returning empty data.
