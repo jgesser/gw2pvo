@@ -17,8 +17,16 @@ class GoodWeApi:
         self.account = account
         self.password = password
         self.token = '{"version":"v3.1","client":"ios","language":"en"}'
-        self.global_url = 'https://www.semsportal.com/api/'
-        self.base_url = self.global_url
+        # Any of these hosts accepts CrossLogin and answers with the account's
+        # regional API in data['api']. Tried in order, since www.semsportal.com
+        # started returning 502 in Oct 2026 while the regional hosts kept working.
+        self.login_urls = [
+            'https://www.semsportal.com/api/',
+            'https://eu.semsportal.com/api/',
+            'https://au.semsportal.com/api/',
+            'https://hk.semsportal.com/api/',
+        ]
+        self.base_url = None
 
     def statusText(self, status):
         labels = { -1 : 'Offline', 0 : 'Waiting', 1 : 'Normal', 2: 'Fault' }
@@ -257,15 +265,40 @@ class GoodWeApi:
 
         return result
 
+    def headers(self):
+        return {
+            'User-Agent': 'SEMS Portal/3.1 (iPhone; iOS 13.5.1; Scale/2.00)',
+            'Token': self.token,
+        }
+
+    def login(self):
+        loginPayload = {
+            'account': self.account,
+            'pwd': self.password,
+        }
+        for login_url in self.login_urls:
+            try:
+                r = requests.post(login_url + 'v2/Common/CrossLogin', headers=self.headers(), data=loginPayload, timeout=10)
+                r.raise_for_status()
+                data = r.json()
+            except (requests.exceptions.RequestException, ValueError) as exp:
+                logging.warning("GoodWe login on %s failed: %s", login_url, exp)
+                continue
+            if str(data.get('code')) != '0' or 'api' not in data:
+                # Rejected credentials (e.g. code 100005) are rejected by every
+                # host, no point trying the others. Note a rejection still has 'api'.
+                raise Exception("Failed to login on GoodWe API: {}".format(data.get('msg')))
+            self.base_url = data['api']
+            self.token = json.dumps(data['data'])
+            return
+        raise Exception("Failed to login on GoodWe API (no login host available)")
+
     def call(self, url, payload):
+        if self.base_url is None:
+            self.login()
         for i in range(1, 4):
             try:
-                headers = {
-                    'User-Agent': 'SEMS Portal/3.1 (iPhone; iOS 13.5.1; Scale/2.00)',
-                    'Token': self.token,
-                }
-
-                r = requests.post(self.base_url + url, headers=headers, data=payload, timeout=10)
+                r = requests.post(self.base_url + url, headers=self.headers(), data=payload, timeout=10)
                 r.raise_for_status()
                 data = r.json()
                 logging.debug(data)
@@ -277,18 +310,9 @@ class GoodWeApi:
 
                 if code == 0 and data['data'] is not None:
                     return data['data']
-                elif code == 100001:
-                    loginPayload = {
-                        'account': self.account,
-                        'pwd': self.password,
-                    }
-                    r = requests.post(self.global_url + 'v2/Common/CrossLogin', headers=headers, data=loginPayload, timeout=10)
-                    r.raise_for_status()
-                    data = r.json()
-                    if 'api' not in data:
-                        raise Exception(data['msg'])
-                    self.base_url = data['api']
-                    self.token = json.dumps(data['data'])
+                elif code in (100001, 100002):
+                    # 100001: not logged in, 100002: token expired
+                    self.login()
                 else:
                     raise Exception("Failed to call GoodWe API (code {})".format(code))
             except requests.exceptions.RequestException as exp:
