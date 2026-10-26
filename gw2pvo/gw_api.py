@@ -276,13 +276,17 @@ class GoodWeApi:
             'account': self.account,
             'pwd': self.password,
         }
+        errors = []
         for login_url in self.login_urls:
             try:
                 r = requests.post(login_url + 'v2/Common/CrossLogin', headers=self.headers(), data=loginPayload, timeout=10)
                 r.raise_for_status()
                 data = r.json()
             except (requests.exceptions.RequestException, ValueError) as exp:
-                logging.warning("GoodWe login on %s failed: %s", login_url, exp)
+                # Only debug: a dead host is expected while another one works, and
+                # anything on stderr makes /importPVO (HomeAutomationServer) return 500
+                logging.debug("GoodWe login on %s failed: %s", login_url, exp)
+                errors.append("{}: {}".format(login_url, exp))
                 continue
             if str(data.get('code')) != '0' or 'api' not in data:
                 # Rejected credentials (e.g. code 100005) are rejected by every
@@ -291,7 +295,7 @@ class GoodWeApi:
             self.base_url = data['api']
             self.token = json.dumps(data['data'])
             return
-        raise Exception("Failed to login on GoodWe API (no login host available)")
+        raise Exception("Failed to login on GoodWe API (no login host available): {}".format("; ".join(errors)))
 
     def call(self, url, payload):
         if self.base_url is None:
