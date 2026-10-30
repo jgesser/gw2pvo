@@ -20,6 +20,7 @@ from gw2pvo import gw_api
 from gw2pvo import netatmo_api
 from gw2pvo import gw_csv
 from gw2pvo import pvo_api
+from gw2pvo import sems_plus_api
 from gw2pvo import __version__
 
 __author__ = "Mark Ruys"
@@ -48,7 +49,14 @@ def get_temperature(settings, latitude, longitude):
         return ds.get_temperature(latitude, longitude)
     return None
 
-def run_once(settings, city):
+def get_gw_api(settings):
+    if settings.gw_api == 'semsplus':
+        return sems_plus_api.SemsPlusApi(settings.gw_station_id, settings.gw_account, settings.gw_password)
+    if settings.gw_api == 'sems':
+        return gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
+    sys.exit("Invalid gw_api '{}', use semsplus or sems".format(settings.gw_api))
+
+def run_once(settings, city, gw):
     global last_eday_kwh
 
     # Check if we only want to run during daylight
@@ -59,7 +67,6 @@ def run_once(settings, city):
             return
 
     # Fetch the last reading from GoodWe
-    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
     data = gw.getCurrentReadings()
 
     # Check if we want to abort when offline
@@ -128,7 +135,8 @@ def copy(settings):
 
 def run():
     defaults = {
-        'log': "info"
+        'log': "info",
+        'gw_api': "semsplus"
     }
 
     # Parse any config file specification. We make this parser with add_help=False so
@@ -159,6 +167,7 @@ def run():
     parser.add_argument("--gw-inverter-id", help="GoodWe inverter ID", metavar='ID')
     parser.add_argument("--gw-account", help="GoodWe account", metavar='ACCOUNT')
     parser.add_argument("--gw-password", help="GoodWe password", metavar='PASSWORD')
+    parser.add_argument("--gw-api", help="GoodWe API to read the current values from (default semsplus). Copying a day with --date always uses the classic sems API", choices=['semsplus', 'sems'])
     parser.add_argument("--pvo-system-id", help="PVOutput system ID", metavar='ID')
     parser.add_argument("--pvo-api-key", help="PVOutput API key", metavar='KEY')
     parser.add_argument("--pvo-interval", help="PVOutput interval in minutes", type=int, choices=[5, 10, 15])
@@ -211,9 +220,12 @@ def run():
 
     startTime = datetime.now()
 
+    # One client for all runs, to keep its session instead of logging in every interval
+    gw = get_gw_api(args)
+
     while True:
         try:
-            run_once(args, city)
+            run_once(args, city, gw)
         except KeyboardInterrupt:
             sys.exit(1)
         except Exception as exp:

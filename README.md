@@ -39,6 +39,7 @@ Optionally, for actual weather information you can get a (free) [Dark Sky API](h
 ```shell
 usage: gw2pvo [-h] [--config FILE] [--gw-station-id ID]
                    [--gw-account ACCOUNT] [--gw-password PASSWORD]
+                   [--gw-api {semsplus,sems}]
                    [--pvo-system-id ID] [--pvo-api-key KEY]
                    [--pvo-interval {5,10,15}]
                    [--darksky-api-key DARKSKY_API_KEY]
@@ -60,6 +61,10 @@ optional arguments:
   --gw-account ACCOUNT  GoodWe account
   --gw-password PASSWORD
                         GoodWe password
+  --gw-api {semsplus,sems}
+                        GoodWe API to read the current values from (default
+                        semsplus). Copying a day with --date always uses the
+                        classic sems API
   --pvo-system-id ID    PVOutput system ID
   --pvo-api-key KEY     PVOutput API key
   --pvo-interval {5,10,15}
