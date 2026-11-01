@@ -84,6 +84,13 @@ class SemsPlusApiTest(unittest.TestCase):
         api.login.assert_called_once()
         self.assertEqual(send.call_count, 2)
 
+    def test_login_as_client(self):
+        for client, expected in ((None, 'semsPlusWeb'), ('web', 'web')):
+            api = SemsPlusApi('station', 'account', 'password', *([client] if client else []))
+            with mock.patch.object(api, 'send', return_value={'code': '00000', 'data': {'api': 'https://gateway'}}) as send:
+                api.login()
+            self.assertEqual(send.call_args[0][2]['client'], expected)
+
     def test_error_code(self):
         api = SemsPlusApi('station', 'account', 'password')
         with self.assertRaisesRegex(Exception, '100005: Email or password error'):

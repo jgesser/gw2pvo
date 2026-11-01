@@ -17,6 +17,8 @@ power curve (see "Open points").
 
 The API for live readings is a setting: `--gw-api semsplus` (default) or
 `--gw-api sems`, or `gw_api = sems` in the `[Defaults]` of the config file.
+The SEMS+ client type is `--gw-client` (default `semsPlusWeb`) or `gw_client` in
+the config file; see "Sessions" below for why the server sets `web`.
 Both clients have the same `getCurrentReadings()`. Going back to `sems` only
 makes sense if SEMS+ breaks while the legacy real-time data works again: today
 it reports the inverter as Offline.
@@ -87,10 +89,22 @@ from the login response (`data.api`, here `https://us-gateway.semsportal.com/web
   `stations/flow` (station power and status, kW), `stations/production` and
   `stations/statistics` (`proSystemTotalStats`, per day/year; today's value and
   the lifetime total match telecounting).
-- **Sessions**: a new login invalidates the previous token of the *same* API
-  only. Legacy and SEMS+ logins do not affect each other (tested), so this
-  client, the openHAB binding and `/importPVO` can run at the same time. Two
-  SEMS+ clients on one account would log each other out on every call.
+- **Sessions** (tested 2026-10-30): a new login invalidates the previous token
+  of the same API **and the same client type** only.
+  - Legacy and SEMS+ logins do not affect each other.
+  - The client type is the `client` of the `token` header of the login. The server
+    only accepts `semsPlusWeb`, `web`, `ios` and `android` (case sensitive). Any other value
+    is refused: `gw2pvo`, `openhab`, `foo`, `h5`, `pc`, empty and `semsPlusApp` give code
+    `100004`; `Web`, `IOS` and `semsplusweb` give `100000`. There may be other valid values.
+  - A `web` session stayed valid for 6 minutes of polling every 15 s while a second program
+    logged in as `semsPlusWeb` (twice: mine, then the production gw2pvo), while the two
+    `semsPlusWeb` sessions replaced each other. Tokens of `web`, `ios` and `android` read all the
+    endpoints above with the same gateway and values as `semsPlusWeb`.
+  - So two programs using one account need different client types. `ios` and `android` are the
+    types of the phone apps: logging in with them logs the app out. `semsPlusWeb` is the type of
+    the SEMS+ web app, also used by the Home Assistant integration (fixed there, not configurable):
+    opening semsplus.goodwe.com in a browser and logging in logs out a program using it, and the
+    reverse. `web` is the only one without an obvious app, so gw2pvo uses it here.
 
 ## Other integrations
 
@@ -116,6 +130,12 @@ from the login response (`data.api`, here `https://us-gateway.semsportal.com/web
 - The night-time status code of SEMS+ is not verified (all tests ran while the
   inverter was producing). If a status other than the table above shows up, the
   warning `Unknown SEMS+ inverter status` names it.
+- **Dawn**: around 05:15 the inverter is `Waiting` (0 W) for 20 to 30 minutes before it produces. The
+  classic API called that phase `Offline`, so `skip_offline` skipped it; with SEMS+ points with 0 W and 0 Wh
+  and 0 V are uploaded from 05:15 (seen on PVOutput 2026-10-31 and 2026-11-01). Accepted as is. Skipping
+  `Waiting` too would restore the old curve start. After sunset SEMS+ keeps reporting the last voltage
+  (220.2 V grid, 388.5 V PV seen at 19:40 on 2026-10-26, with 0 W), which is why telemetry is only read
+  while the inverter is `Normal`.
 - Several inverters: power, energy and totals are summed, but voltage and
   MPPT powers are those of the first online inverter. Never tested with more
   than one inverter.

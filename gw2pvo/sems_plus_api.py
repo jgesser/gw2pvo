@@ -10,7 +10,12 @@ import requests
 class SemsPlusApi:
     ''' SEMS+ (https://semsplus.goodwe.com) has no public API. This is what its web app does, as also
     implemented by https://github.com/TimSoethout/goodwe-sems-home-assistant. Logging in gives a token
-    and the regional gateway to send every other request to. '''
+    and the regional gateway to send every other request to.
+
+    A login replaces the previous session of the same client type of the account: two programs using one
+    account must use different types, or they log each other out. The server only accepts these types. '''
+
+    CLIENTS = ('semsPlusWeb', 'web', 'ios', 'android')
 
     LOGIN_URL = 'https://semsplus.goodwe.com/web/sems/sems-user/api/v1/auth/cross-login'
     # Without browser-like headers the login is rejected (code 100004)
@@ -20,7 +25,7 @@ class SemsPlusApi:
         'Referer': 'https://semsplus.goodwe.com/',
         'Accept': 'application/json, text/plain, */*',
     }
-    ANONYMOUS_TOKEN = {'uid': '', 'timestamp': 0, 'token': '', 'client': 'semsPlusWeb', 'version': '', 'language': 'en'}
+    ANONYMOUS_TOKEN = {'uid': '', 'timestamp': 0, 'token': '', 'version': '', 'language': 'en'}
 
     OK = '00000'
     # The token expired, or a newer login (of this account) replaced it
@@ -29,10 +34,11 @@ class SemsPlusApi:
     # Inverter status codes
     STATUS_LABELS = {-1: 'Offline', 0: 'Waiting', 1: 'Normal', 2: 'Fault', 3: 'Waiting', 5: 'Normal'}
 
-    def __init__(self, system_id, account, password):
+    def __init__(self, system_id, account, password, client='semsPlusWeb'):
         self.system_id = system_id
         self.account = account
         self.password = password
+        self.client = client
         self.session = requests.Session()
         self.session.headers.update(self.HEADERS)
         self.token = None
@@ -61,9 +67,8 @@ class SemsPlusApi:
             'isChinese': False,
             'isLocal': False,
         }
-        token = self.data(self.send('POST', self.LOGIN_URL, self.ANONYMOUS_TOKEN, json=payload))
-        token['client'] = 'semsPlusWeb'
-        self.token = token
+        anonymous = dict(self.ANONYMOUS_TOKEN, client=self.client)
+        self.token = self.data(self.send('POST', self.LOGIN_URL, anonymous, json=payload))
 
     def call(self, method, path, **kwargs):
         if self.token is None:

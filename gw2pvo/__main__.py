@@ -51,7 +51,9 @@ def get_temperature(settings, latitude, longitude):
 
 def get_gw_api(settings):
     if settings.gw_api == 'semsplus':
-        return sems_plus_api.SemsPlusApi(settings.gw_station_id, settings.gw_account, settings.gw_password)
+        if settings.gw_client not in sems_plus_api.SemsPlusApi.CLIENTS:
+            sys.exit("Invalid gw_client '{}', use {}".format(settings.gw_client, ', '.join(sems_plus_api.SemsPlusApi.CLIENTS)))
+        return sems_plus_api.SemsPlusApi(settings.gw_station_id, settings.gw_account, settings.gw_password, settings.gw_client)
     if settings.gw_api == 'sems':
         return gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
     sys.exit("Invalid gw_api '{}', use semsplus or sems".format(settings.gw_api))
@@ -136,7 +138,8 @@ def copy(settings):
 def run():
     defaults = {
         'log': "info",
-        'gw_api': "semsplus"
+        'gw_api': "semsplus",
+        'gw_client': "semsPlusWeb"
     }
 
     # Parse any config file specification. We make this parser with add_help=False so
@@ -168,6 +171,7 @@ def run():
     parser.add_argument("--gw-account", help="GoodWe account", metavar='ACCOUNT')
     parser.add_argument("--gw-password", help="GoodWe password", metavar='PASSWORD')
     parser.add_argument("--gw-api", help="GoodWe API to read the current values from (default semsplus). Copying a day with --date always uses the classic sems API", choices=['semsplus', 'sems'])
+    parser.add_argument("--gw-client", help="Client type to log in to semsplus as (default semsPlusWeb). A login replaces the previous session of the same type, so use another type than the other programs using this account", choices=sems_plus_api.SemsPlusApi.CLIENTS)
     parser.add_argument("--pvo-system-id", help="PVOutput system ID", metavar='ID')
     parser.add_argument("--pvo-api-key", help="PVOutput API key", metavar='KEY')
     parser.add_argument("--pvo-interval", help="PVOutput interval in minutes", type=int, choices=[5, 10, 15])
