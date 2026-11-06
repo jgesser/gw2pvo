@@ -114,9 +114,9 @@ from the login response (`data.api`, here `https://us-gateway.semsportal.com/web
   client does not need at one poll per 5 minutes.
 - **`timvanderHorst/goodwe-semsplus`**: small "pure requests" SEMS+ client, the
   best reference for the login and signature.
-- **openHAB** `semsportal` binding: reads the legacy API, see
-  `SEMS_API_NOTES.md` in `bundles/org.openhab.binding.semsportal` of the
-  `feature/semsportal` branch.
+- **openHAB** `semsportal` binding: reads SEMS+ since it was merged into
+  openhab-addons (PR #22184, 2026-11-06). Its endpoints, channel mapping and the
+  legacy API notes are in `SEMS_API_NOTES.md` (same folder).
 - `ashwhall/ha-sems-plus-addon`: Playwright scraper of the SEMS+ web UI. Fragile,
   a last resort.
 
