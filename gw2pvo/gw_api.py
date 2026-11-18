@@ -154,22 +154,12 @@ class GoodWeApi:
         return result
 
     def getActualKwh(self, date):
-        payload = {
-            'powerstation_id' : self.system_id,
-            'count' : 1,
-            'date' : date.strftime('%Y-%m-%d')
-        }
-        data = self.call("v2/PowerStationMonitor/GetPowerStationPowerAndIncomeByDay", payload)
-        if not data:
-            logging.warning("GetPowerStationPowerAndIncomeByDay missing data")
-            return 0
-
-        eday_kwh = 0
-        for day in data:
-            if day['d'] == date.strftime('%m/%d/%Y'):
-                eday_kwh = day['p']
-
-        return eday_kwh
+        ''' Energy of the day in kWh: the highest point of the Eday series of the inverter, which grows during
+        the day and goes back to 0 after midnight. GetPowerStationPowerAndIncomeByDay is not used anymore: it
+        only had a value for the current day and, since 2026-11-10, it does not answer at all (read timeout),
+        which made every import fail. '''
+        values = [v for v in self.getColumnByDay(date, 'Eday').values() if v is not None]
+        return max(values) if values else 0
 
     def getLocation(self):
         # GetMonitorDetailByPowerstationId was discontinued by GoodWe (always
