@@ -49,6 +49,32 @@ recebeu a mudança e continua falando com o `www.semsportal.com`, que está fora
 propósito (o branch `semsportal-sems-plus-5.2` do fork tem a versão para a 5.2.x, com o `pom.xml` reformatado
 porque o da `5.2.x` não passa no `spotless:check`). O issue #21786 (NPE com os endpoints mortos) segue aberto.
 
+## B. Histórico de potência (curva de 5 minutos) no SEMS+ (2026-11-18)
+
+Achado lendo o JavaScript público do site e testando com a conta (só leitura). É a chamada que a página de
+**Relatórios** do site usa; o gw2pvo importa dias passados com ela (`SemsPlusApi.getDayReadings`).
+
+1. `GET /sems-plant/api/user/settings/userTableHeaders?resourceKey=resource_station_real_time_report` devolve as
+   colunas do relatório (lista de grupos `base` e `real_time`). Sem elas o relatório responde `REP0004`.
+2. `POST /sems-report/api/report/station/real-time`, corpo:
+   `{"reportCategorize":"STATION","reportType":"REAL_TIME","reportingPeriod":"day","timeScale":5,
+   "startTime":"YYYY-MM-DD 00:00:00","endTime":"YYYY-MM-DD 23:59:59","stationIds":["<id>"],
+   "reportIndex":{"userTableHeaders":<lista do passo 1>}}`.
+   Resposta: `realTimeData[0].metricPointData` com `pSystem` (potência em kW), `pGrid`, `pConsum`, `pBat`, `pDiesel`,
+   `soc`, cada um `{"HH:MM": valor|null}` com 288 pontos por dia, e `stationBaseInfo` (traz o nome e o endereço do
+   usuário). Corpo incompleto ou datas em outro formato dão `B0001`.
+3. Energia do dia: `POST /sems-plant/api/stations/statistics` com `dimension: "day"` e `items:
+   ["proSystemTotalStats"]` (um ponto por dia; as dimensões só são day, month e year).
+
+**Horário**: o rótulo `HH:MM` é o do relógio do portal. Comparado com 581 leituras `(hora do portal, W)` gravadas pelo
+binding do openHAB, a série bate sem diferença nos minutos múltiplos de 5. A série da API clássica
+(`GetInverterDataByColumn`, coluna `Pac`) é a mesma série, com os rótulos 5 minutos adiantados.
+
+**Não há** tensão da rede nem potência por MPPT no histórico: o relatório do inversor só lista pAc, qAc, pf e colunas de
+bateria (o caminho dele não foi achado: `/report/inverter/real-time` e variações dão `B0001`). O endpoint
+`/sems-plant/api/v1/hems/power/statisticsAndPreV2` existe, mas só devolve pontos para usinas com bateria ou medidor
+(HEMS); nesta usina vem vazio.
+
 ## 0. Incidente 2026-10-26: `www.semsportal.com` responde 502
 
 - `www.semsportal.com` e `us.semsportal.com` respondem `502 Bad Gateway` (nginx) a qualquer requisição.
@@ -115,7 +141,7 @@ Body    {"account":"<email>","pwd":"<senha em texto>"}
 | `v2/PowerStation/GetMonitorDetailByPowerstationId` | `code 0`, `data: {}` |
 | `v2/PowerStationMonitor/GetPowerStationPacByDayForApp` | lista vazia |
 | `PowerStationMonitor/QueryPowerStationMonitorForApp` | `data: {messageKey, list: []}` (antes era array) |
-| `v2/PowerStationMonitor/GetPowerStationPowerAndIncomeByDay` | **parcial**: só o dia atual tem valor; dias passados vêm `p: 0` |
+| `v2/PowerStationMonitor/GetPowerStationPowerAndIncomeByDay` | **parcial**: só o dia atual tem valor; dias passados vêm `p: 0`. Desde 2026-11-10 **não responde** (read timeout) |
 
 ### 2.3 Endpoints que funcionam (usados pelo binding)
 
@@ -277,6 +303,11 @@ Tipos de dispositivo vistos: `INVERTER`, `SMART_METER`, `ENERGY_STORAGE_INTEGRAT
 - telecounting:
   - `proPvStatsToday` (eday), `proPvStatsWeek`, `proPvStatsMonth` (mês), `proPvStatsYear`, `proPvStatsTotal` (etotal);
   - `ratedPower` (capacidade).
+  - Os fatores vêm em grupos (`telecounting_real`, `_today`, `_week`, `_month`, `_year`, `_lifetime`). Desde 2026-11-19
+    02:30 o cliente `semsPlusWeb` recebe `A0400` se a requisição não trouxer o parâmetro `groups` com **exatamente um**
+    grupo (vírgula, parâmetro repetido, `groups[]` e vários grupos também dão `A0400`); o cliente `web` ainda aceita
+    sem `groups`, aceita com um grupo e, com um grupo inválido, devolve todos. Por isso uma requisição por grupo:
+    `groups=telecounting_today` (`proPvStatsToday`), `telecounting_month`, `telecounting_lifetime` (`proPvStatsTotal`).
 - statistics items: `proSystemTotalStats`, `proGridStats`, `proPurchaseStats`, `proConsumStats`,
   `proSelfConsumStats`, `proCharStats`, `proDischarStats`.
 

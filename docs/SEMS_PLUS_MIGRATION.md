@@ -10,10 +10,18 @@ issue #206): the legacy API is being dismantled piece by piece instead.
 | What | Client | API |
 |---|---|---|
 | Live readings, every `--pvo-interval` (`run_once`) | `sems_plus_api.SemsPlusApi` | SEMS+ |
-| History, `--date` (`copy`, and `/importPVO` of HomeAutomationServer) | `gw_api.GoodWeApi` | legacy |
+| History, `--date` (`copy`, and `/importPVO` of HomeAutomationServer) | `sems_plus_api.SemsPlusApi.getDayReadings` | SEMS+ (since 2026-11-18) |
 
-History stays on the legacy API because no SEMS+ endpoint gives the 5 minute
-power curve (see "Open points").
+History moved to SEMS+ when the legacy endpoint `GetPowerStationPowerAndIncomeByDay` stopped answering
+(2026-11-10, every `/importPVO` failed). It reads the real-time report of the web app (`sems-report`), see
+`SEMS_API_NOTES.md`, section B: the 5 minute power of the station, with the times of the portal, and the energy of the
+day from `stations/statistics`. That report has no voltage and no power per string, so imported points have only
+energy and power. PVOutput keeps the voltage and the extended values (v7 and up) that the live loop uploaded for the
+same time: an upload with empty fields does not clear them (tested 2026-11-18). `--gw-api sems` still imports from the
+legacy API, which has the voltages and the power per string.
+
+The classic series has its times 5 minutes early: the SEMS+ times match the clock of the portal (checked against 581
+readings of the openHAB binding). So importing a day again moves its curve 5 minutes later.
 
 The API for live readings is a setting: `--gw-api semsplus` (default) or
 `--gw-api sems`, or `gw_api = sems` in the `[Defaults]` of the config file.
@@ -122,11 +130,8 @@ from the login response (`data.api`, here `https://us-gateway.semsportal.com/web
 
 ## Open points
 
-- **`--date` / `/importPVO` still use the legacy API.** If its history stops,
-  options in order: upload the day's total from `stations/statistics`
-  (`dimension: day`, past days included) with PVOutput `addoutput.jsp`, losing
-  the curve; look for an intraday endpoint in the SEMS+ web UI's browser
-  traffic; Playwright scraping.
+- **History has no voltage and no power per string** (SEMS+ real-time report). Looking for a SEMS+ source of the power
+  per MPPT of a past day; the inverter report of the web app lists only pAc, qAc, pf and battery columns.
 - The night-time status code of SEMS+ is not verified (all tests ran while the
   inverter was producing). If a status other than the table above shows up, the
   warning `Unknown SEMS+ inverter status` names it.

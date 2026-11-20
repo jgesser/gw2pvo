@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import unittest
+from datetime import datetime
 from unittest import mock
 
 from gw2pvo.sems_plus_api import SemsPlusApi
@@ -48,6 +49,18 @@ class SemsPlusApiTest(unittest.TestCase):
         self.assertEqual(data['pv_voltage'], 811.8)
         self.assertEqual(data['powers'], [990.2, 803.9, 406.3, 2200.4])
 
+    def test_counters_are_requested_one_group_per_request(self):
+        api = self.recording_api({
+            'all-status': station(('SN1', -1)),
+            'telecounting': factors(proPvStatsToday=0, proPvStatsTotal=49119.4),
+        })
+        api.getCurrentReadings()
+        # The portal answers an error to some client types when no group, or more than one, is requested
+        counting = [kwargs['params'] for method, path, kwargs in api.requests if path.endswith('/telecounting')]
+        self.assertEqual([params.get('groups') for params in counting], ['telecounting_today', 'telecounting_lifetime'])
+        for params in counting:
+            self.assertEqual(params['deviceType'], 'INVERTER')
+
     def test_offline_inverter_still_reports_energy(self):
         api = self.api({
             'device/all-status': station(('SN1', -1)),
@@ -74,6 +87,85 @@ class SemsPlusApiTest(unittest.TestCase):
         self.assertEqual(data['eday_kwh'], 6)
         self.assertEqual(data['etotal_kwh'], 60)
         self.assertEqual(data['grid_voltage'], 220)  # Of the first online inverter
+
+    def recording_api(self, responses):
+        ''' An api answering by the last part of the path, which remembers the requests as (method, path, arguments). '''
+        api = SemsPlusApi('station', 'account', 'password')
+        api.requests = []
+
+        def call(method, path, **kwargs):
+            api.requests.append((method, path, kwargs))
+            response = responses[path.split('/')[-1]]
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        api.call = call
+        return api
+
+    def day_responses(self, powers, total=None):
+        ''' The responses for a day: the power by time of the station report, and the energy of the day. '''
+        return {
+            'userTableHeaders': [{'field': 'real_time'}],
+            'real-time': {'realTimeData': [{'metricPointData': {'pSystem': powers}}] if powers is not None else []},
+            'statistics': total if isinstance(total, Exception) else
+            {'dataList': [{'item': 'proSystemTotalStats', 'statisticsList': [{'date': '2026-11-17', 'val': total}]}]},
+        }
+
+    def test_day_readings(self):
+        api = self.recording_api(self.day_responses({
+            '00:00': None, '05:20': 0.0, '05:25': 0.6, '12:00': 6.0, '12:05': 3.0, '23:55': 0.0}, total=1.6))
+
+        data = api.getDayReadings(datetime(2026, 11, 17))
+
+        # Only the points with production, at the time of the report, without voltage and without powers per string
+        self.assertEqual([entry['dt'] for entry in data['entries']], [
+            datetime(2026, 11, 17, 5, 25), datetime(2026, 11, 17, 12, 0), datetime(2026, 11, 17, 12, 5)])
+        self.assertEqual([entry['pgrid_w'] for entry in data['entries']], [600.0, 6000.0, 3000.0])
+        self.assertTrue(all(entry['powers'] is None and 'grid_voltage' not in entry for entry in data['entries']))
+        # The points are instants of 5 minutes: 0.8 kWh in the area, which is adjusted to the 1.6 kWh of the day
+        for entry, kwh in zip(data['entries'], [0.1, 1.1, 1.6]):
+            self.assertAlmostEqual(entry['eday_kwh'], kwh)
+        self.assertIsNone(data['latitude'])
+
+    def test_day_readings_request(self):
+        api = self.recording_api(self.day_responses({'12:00': 6.0}, total=1))
+
+        api.getDayReadings(datetime(2026, 11, 17))
+
+        (method, path, kwargs), (report_method, report_path, report), (stats_method, stats_path, stats) = api.requests
+        self.assertEqual((method, path), ('GET', '/sems-plant/api/user/settings/userTableHeaders'))
+        self.assertEqual(kwargs, {'params': {'resourceKey': 'resource_station_real_time_report'}})
+        self.assertEqual((report_method, report_path), ('POST', '/sems-report/api/report/station/real-time'))
+        self.assertEqual(report['json'], {
+            'reportCategorize': 'STATION', 'reportType': 'REAL_TIME', 'reportingPeriod': 'day', 'timeScale': 5,
+            'startTime': '2026-11-17 00:00:00', 'endTime': '2026-11-17 23:59:59', 'stationIds': ['station'],
+            'reportIndex': {'userTableHeaders': [{'field': 'real_time'}]}})
+        self.assertEqual((stats_method, stats_path), ('POST', '/sems-plant/api/stations/statistics'))
+        self.assertEqual(stats['json']['dimension'], 'day')
+        self.assertEqual(stats['json']['startTime'], '2026-11-17 00:00:00')
+
+    def test_day_readings_without_the_energy_of_the_day(self):
+        # The energy only corrects the area under the points: the power is imported without it
+        api = self.recording_api(self.day_responses({'12:00': 6.0, '12:05': 3.0}, total=Exception('no energy')))
+
+        data = api.getDayReadings(datetime(2026, 11, 17))
+
+        self.assertEqual([entry['pgrid_w'] for entry in data['entries']], [6000.0, 3000.0])
+        self.assertAlmostEqual(data['entries'][-1]['eday_kwh'], 0.75)
+
+    def test_day_readings_without_points(self):
+        for powers in (None, {}, {'12:00': None, '12:05': 0.0}):
+            api = self.recording_api(self.day_responses(powers, total=0))
+            self.assertEqual(api.getDayReadings(datetime(2026, 11, 17))['entries'], [])
+
+    def test_day_total(self):
+        api = self.recording_api(self.day_responses({}, total=25.2))
+        self.assertEqual(api.getDayTotal(datetime(2026, 11, 17)), 25.2)
+        # A statistics list of another day, or without value, is no energy
+        for points in ([{'date': '2026-11-16', 'val': 9.0}], [{'date': '2026-11-17', 'val': None}], []):
+            api = self.recording_api({'statistics': {'dataList': [{'statisticsList': points}]}})
+            self.assertEqual(api.getDayTotal(datetime(2026, 11, 17)), 0)
 
     def test_login_again_when_session_expired(self):
         api = SemsPlusApi('station', 'account', 'password')

@@ -113,7 +113,7 @@ def copy(settings):
     # Fetch readings from GoodWe
     date = datetime.strptime(settings.date, "%Y-%m-%d")
 
-    gw = gw_api.GoodWeApi(settings.gw_station_id, settings.gw_inverter_id, settings.gw_account, settings.gw_password)
+    gw = get_gw_api(settings)
     data = gw.getDayReadings(date)
 
     if settings.pvo_system_id and settings.pvo_api_key:
@@ -170,7 +170,7 @@ def run():
     parser.add_argument("--gw-inverter-id", help="GoodWe inverter ID", metavar='ID')
     parser.add_argument("--gw-account", help="GoodWe account", metavar='ACCOUNT')
     parser.add_argument("--gw-password", help="GoodWe password", metavar='PASSWORD')
-    parser.add_argument("--gw-api", help="GoodWe API to read the current values from (default semsplus). Copying a day with --date always uses the classic sems API", choices=['semsplus', 'sems'])
+    parser.add_argument("--gw-api", help="GoodWe API to read the values from (default semsplus), also when copying a day with --date. The semsplus readings of a past day have only the power: no voltage and no power per string", choices=['semsplus', 'sems'])
     parser.add_argument("--gw-client", help="Client type to log in to semsplus as (default semsPlusWeb). A login replaces the previous session of the same type, so use another type than the other programs using this account", choices=sems_plus_api.SemsPlusApi.CLIENTS)
     parser.add_argument("--pvo-system-id", help="PVOutput system ID", metavar='ID')
     parser.add_argument("--pvo-api-key", help="PVOutput API key", metavar='KEY')

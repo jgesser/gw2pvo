@@ -63,9 +63,10 @@ optional arguments:
   --gw-password PASSWORD
                         GoodWe password
   --gw-api {semsplus,sems}
-                        GoodWe API to read the current values from (default
-                        semsplus). Copying a day with --date always uses the
-                        classic sems API
+                        GoodWe API to read the values from (default semsplus),
+                        also when copying a day with --date. The semsplus
+                        readings of a past day have only the power: no voltage
+                        and no power per string
   --gw-client {semsPlusWeb,web,ios,android}
                         Client type to log in to semsplus as (default
                         semsPlusWeb). A login replaces the previous session of
